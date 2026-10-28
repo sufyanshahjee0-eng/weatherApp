@@ -1,26 +1,74 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Weather App</title>
+  <title>Weather API Data Collection and Visualization</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; background: #eef3f8; }
-    h1 { text-align: center; }
-    form { display: flex; gap: 8px; }
-    input { flex: 1; padding: 10px; font-size: 16px; }
-    button { padding: 10px 16px; font-size: 16px; cursor: pointer; }
-    .card { background: white; border-radius: 10px; padding: 16px; margin-top: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
-    .error { color: #b00020; }
+    body { font-family: Arial, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; background: #eef3f8; color: #1b2a3a; }
+    h1 { text-align: center; margin-bottom: 4px; }
+    .sub { text-align: center; color: #5a6b7d; margin-top: 0; }
+    form { display: flex; gap: 8px; margin-top: 16px; }
+    input[type=text] { flex: 1; padding: 10px; font-size: 16px; }
+    button { padding: 9px 14px; font-size: 15px; cursor: pointer; border: 1px solid #9db2c7; background: #fff; border-radius: 6px; }
+    button:hover { background: #e3edf7; }
+    .quick { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .card { background: #fff; border-radius: 10px; padding: 16px; margin-top: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+    .card h2, .card h3 { margin-top: 0; }
+    .error { background: #fdecea; color: #b00020; border-left: 4px solid #b00020; }
+    .warn { color: #b26a00; font-weight: bold; }
+    .alert { font-weight: bold; }
+    .status { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 16px; font-size: 14px; }
+    .badge { padding: 2px 10px; border-radius: 12px; color: #fff; }
+    .on { background: #2b8a3e; } .off { background: #c92a2a; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 6px; border-bottom: 1px solid #e1e8ef; }
+    .tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+    canvas { max-height: 260px; }
   </style>
 </head>
 <body>
-  <h1>Weather App</h1>
+  <h1>Weather Data Collection System</h1>
+  <p class="sub">Data source: Open-Meteo API (free, no API key)</p>
+
   <form id="form">
-    <input id="city" value="Karachi" placeholder="City name">
+    <input type="text" id="city" value="Karachi" placeholder="Enter city name">
     <button type="submit">Search</button>
   </form>
-  <div id="result"></div>
+  <div class="quick">
+    <button data-city="Karachi">Karachi</button>
+    <button data-city="Lahore">Lahore</button>
+    <button data-city="Islamabad">Islamabad</button>
+    <label><input type="checkbox" id="auto"> Auto-collect every 60 s</label>
+  </div>
+
+  <div class="status">
+    <span>Last successful update: <b id="updated">none yet</b></span>
+    <span>Connection: <span id="net" class="badge on">Online</span></span>
+  </div>
+
+  <div id="msg"></div>
+  <div id="weather"></div>
+
+  <div class="card">
+    <h3>Temperature trend (saved data)</h3>
+    <canvas id="tempChart"></canvas>
+  </div>
+  <div class="card">
+    <h3>Humidity and wind trend (saved data)</h3>
+    <canvas id="humChart"></canvas>
+  </div>
+  <div id="chartNote"></div>
+
+  <div class="card">
+    <h3>Saved weather snapshots (latest 10)</h3>
+    <div id="history"></div>
+    <div class="tools">
+      <button id="export">Export CSV</button>
+      <button id="clear">Clear history</button>
+    </div>
+  </div>
 
   <script>
     const WEATHER_CODES = {
@@ -33,22 +81,56 @@
       95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail"
     };
 
-    const CITY_COORDINATES = {
+    const KNOWN = {
       "karachi": ["Karachi", 24.8607, 67.0011],
       "lahore": ["Lahore", 31.5204, 74.3587],
       "islamabad": ["Islamabad", 33.6844, 73.0479]
     };
 
+    const STORE_KEY = "weatherSnapshots";
+    const $ = function (id) { return document.getElementById(id); };
+    let currentCity = "Karachi";
+    let charts = {};
+    let timer = null;
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+      });
+    }
+
+    function loadStore() {
+      try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; } catch (e) { return []; }
+    }
+    function saveStore(rows) {
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(rows.slice(-500))); } catch (e) {}
+    }
+
+    // Request -> Internet -> API server -> JSON response
+    async function fetchJson(url) {
+      const controller = new AbortController();
+      const timeout = setTimeout(function () { controller.abort(); }, 10000);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error("Weather service error (HTTP " + res.status + ").");
+        return await res.json();
+      } catch (e) {
+        if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+        if (e instanceof TypeError) throw new Error("No internet connection, or the weather service is unreachable.");
+        throw e;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
     async function findLocation(city) {
       city = city.trim();
       if (!city) throw new Error("Please enter a city name.");
-      const known = CITY_COORDINATES[city.toLowerCase()];
+      const known = KNOWN[city.toLowerCase()];
       if (known) return known;
-      const res = await fetch("https://geocoding-api.open-meteo.com/v1/search?name=" +
+      const data = await fetchJson("https://geocoding-api.open-meteo.com/v1/search?name=" +
         encodeURIComponent(city) + "&count=1&language=en&format=json");
-      if (!res.ok) throw new Error("Unable to connect to the weather service.");
-      const data = await res.json();
-      if (!data.results || !data.results.length) throw new Error("Location not found.");
+      if (!data.results || !data.results.length) throw new Error('City "' + city + '" was not found.');
       const r = data.results[0];
       return [r.name, r.latitude, r.longitude];
     }
@@ -60,44 +142,175 @@
       return "No severe weather alert for the current conditions.";
     }
 
+    function showError(text) {
+      $("msg").innerHTML = '<div class="card error">' + esc(text) + '</div>';
+    }
+    function clearError() { $("msg").innerHTML = ""; }
+
+    function setUpdated(iso) {
+      $("updated").textContent = new Date(iso).toLocaleString();
+    }
+
+    function renderWeather(snap, daily, stale) {
+      let html = '<div class="card"><h2>' + esc(snap.city) + '</h2>';
+      if (stale) html += '<p class="warn">Showing last saved data (may be outdated)</p>';
+      html += '<p>' + esc(snap.condition) + '</p>' +
+        '<p>Temperature: <b>' + snap.temperature + ' °C</b></p>' +
+        '<p>Humidity: <b>' + snap.humidity + ' %</b></p>' +
+        '<p>Wind speed: <b>' + snap.wind + ' km/h</b></p>' +
+        '<p>Recorded at: ' + esc(new Date(snap.time).toLocaleString()) + '</p>' +
+        '<p class="alert">' + getAlert(snap.code, snap.wind) + '</p></div>';
+      if (daily) {
+        html += '<div class="card"><h3>3-day forecast</h3><table><tr><th>Date</th><th>Min / Max (°C)</th><th>Condition</th><th>Rain chance</th></tr>';
+        daily.time.forEach(function (date, i) {
+          html += '<tr><td>' + esc(date) + '</td><td>' + daily.temperature_2m_min[i] + ' / ' + daily.temperature_2m_max[i] +
+            '</td><td>' + esc(WEATHER_CODES[daily.weather_code[i]] || "Unknown condition") +
+            '</td><td>' + daily.precipitation_probability_max[i] + ' %</td></tr>';
+        });
+        html += '</table></div>';
+      }
+      $("weather").innerHTML = html;
+    }
+
+    function makeChart(canvasId, config) {
+      if (charts[canvasId]) charts[canvasId].destroy();
+      charts[canvasId] = new Chart($(canvasId), config);
+    }
+
+    function renderCharts(city) {
+      const rows = loadStore().filter(function (r) { return r.city === city; });
+      if (typeof Chart === "undefined") {
+        $("chartNote").innerHTML = '<div class="card error">Charts could not load (Chart.js needs internet once).</div>';
+        return;
+      }
+      $("chartNote").innerHTML = '<p class="sub">Charts show ' + rows.length + ' saved snapshot(s) for ' + esc(city) + '.</p>';
+      const labels = rows.map(function (r) { return new Date(r.time).toLocaleTimeString(); });
+      makeChart("tempChart", {
+        type: "line",
+        data: { labels: labels, datasets: [{ label: "Temperature (°C)", data: rows.map(function (r) { return r.temperature; }), borderColor: "#d9480f", tension: 0.3 }] }
+      });
+      makeChart("humChart", {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [
+            { label: "Humidity (%)", data: rows.map(function (r) { return r.humidity; }), borderColor: "#1c7ed6", yAxisID: "y", tension: 0.3 },
+            { label: "Wind (km/h)", data: rows.map(function (r) { return r.wind; }), borderColor: "#2b8a3e", yAxisID: "y1", tension: 0.3 }
+          ]
+        },
+        options: {
+          scales: {
+            y: { position: "left", title: { display: true, text: "Humidity (%)" } },
+            y1: { position: "right", title: { display: true, text: "Wind (km/h)" }, grid: { drawOnChartArea: false } }
+          }
+        }
+      });
+    }
+
+    function renderHistory() {
+      const rows = loadStore().slice(-10).reverse();
+      if (!rows.length) { $("history").innerHTML = "<p>No snapshots saved yet.</p>"; return; }
+      let html = "<table><tr><th>Time</th><th>City</th><th>Temp (°C)</th><th>Humidity (%)</th><th>Wind (km/h)</th><th>Condition</th></tr>";
+      rows.forEach(function (r) {
+        html += "<tr><td>" + esc(new Date(r.time).toLocaleString()) + "</td><td>" + esc(r.city) + "</td><td>" + r.temperature +
+          "</td><td>" + r.humidity + "</td><td>" + r.wind + "</td><td>" + esc(r.condition) + "</td></tr>";
+      });
+      $("history").innerHTML = html + "</table>";
+    }
+
     async function load(city) {
-      const box = document.getElementById("result");
-      box.innerHTML = '<div class="card">Loading...</div>';
       try {
-        const [name, lat, lon] = await findLocation(city);
+        const loc = await findLocation(city);
+        const name = loc[0], lat = loc[1], lon = loc[2];
         const url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
           "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code" +
           "&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max" +
           "&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto&forecast_days=3";
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("Unable to connect to the weather service.");
-        const data = await res.json();
+        const data = await fetchJson(url);
+
+        // Parse the JSON response
         const c = data.current, d = data.daily;
+        if (!c || !d) throw new Error("Weather service returned incomplete data.");
+        const snap = {
+          city: name,
+          time: new Date().toISOString(),
+          temperature: c.temperature_2m,
+          humidity: c.relative_humidity_2m,
+          wind: c.wind_speed_10m,
+          code: c.weather_code,
+          condition: WEATHER_CODES[c.weather_code] || "Unknown condition"
+        };
 
-        let html = '<div class="card"><h2>' + name + '</h2>' +
-          '<p>' + (WEATHER_CODES[c.weather_code] || "Unknown condition") + '</p>' +
-          '<p>Temperature: ' + c.temperature_2m + ' °C (min ' + d.temperature_2m_min[0] + ' °C)</p>' +
-          '<p>Humidity: ' + c.relative_humidity_2m + '%</p>' +
-          '<p>Wind: ' + c.wind_speed_10m + ' km/h</p>' +
-          '<p><b>' + getAlert(c.weather_code, c.wind_speed_10m) + '</b></p></div>';
+        // Store the timestamped snapshot
+        const rows = loadStore();
+        rows.push(snap);
+        saveStore(rows);
 
-        html += '<div class="card"><h3>Forecast</h3>';
-        d.time.forEach(function (date, i) {
-          html += '<p>' + date + ': ' + d.temperature_2m_min[i] + '° - ' + d.temperature_2m_max[i] + '° °C, ' +
-            (WEATHER_CODES[d.weather_code[i]] || "Unknown condition") +
-            ', rain ' + d.precipitation_probability_max[i] + '%</p>';
-        });
-        html += '</div>';
-        box.innerHTML = html;
+        currentCity = name;
+        clearError();
+        renderWeather(snap, d, false);
+        setUpdated(snap.time);
+        renderCharts(name);
+        renderHistory();
       } catch (err) {
-        box.innerHTML = '<div class="card error">' + err.message + '</div>';
+        showError(err.message);
+        // Fall back to the last saved data for this city
+        const saved = loadStore().filter(function (r) { return r.city.toLowerCase() === city.trim().toLowerCase(); });
+        if (saved.length) {
+          const last = saved[saved.length - 1];
+          currentCity = last.city;
+          renderWeather(last, null, true);
+          setUpdated(last.time);
+          renderCharts(last.city);
+        } else {
+          $("weather").innerHTML = "";
+        }
+        renderHistory();
       }
     }
 
-    document.getElementById("form").addEventListener("submit", function (e) {
+    function setNet() {
+      const online = navigator.onLine;
+      $("net").textContent = online ? "Online" : "Offline";
+      $("net").className = "badge " + (online ? "on" : "off");
+    }
+
+    $("form").addEventListener("submit", function (e) {
       e.preventDefault();
-      load(document.getElementById("city").value);
+      load($("city").value);
     });
+    document.querySelectorAll(".quick button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $("city").value = b.dataset.city;
+        load(b.dataset.city);
+      });
+    });
+    $("auto").addEventListener("change", function () {
+      if (timer) { clearInterval(timer); timer = null; }
+      if ($("auto").checked) timer = setInterval(function () { load(currentCity); }, 60000);
+    });
+    $("export").addEventListener("click", function () {
+      const rows = loadStore();
+      let csv = "time,city,temperature_c,humidity_percent,wind_kmh,condition\n";
+      rows.forEach(function (r) {
+        csv += [r.time, r.city, r.temperature, r.humidity, r.wind, '"' + r.condition + '"'].join(",") + "\n";
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      a.download = "weather_history.csv";
+      a.click();
+    });
+    $("clear").addEventListener("click", function () {
+      if (confirm("Delete all saved weather snapshots?")) {
+        saveStore([]);
+        renderHistory();
+        renderCharts(currentCity);
+      }
+    });
+    window.addEventListener("online", function () { setNet(); load(currentCity); });
+    window.addEventListener("offline", setNet);
+
+    setNet();
     load("Karachi");
   </script>
 </body>
