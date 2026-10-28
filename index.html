@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather App</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; background: #eef3f8; }
+    h1 { text-align: center; }
+    form { display: flex; gap: 8px; }
+    input { flex: 1; padding: 10px; font-size: 16px; }
+    button { padding: 10px 16px; font-size: 16px; cursor: pointer; }
+    .card { background: white; border-radius: 10px; padding: 16px; margin-top: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+    .error { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>Weather App</h1>
+  <form id="form">
+    <input id="city" value="Karachi" placeholder="City name">
+    <button type="submit">Search</button>
+  </form>
+  <div id="result"></div>
+
+  <script>
+    const WEATHER_CODES = {
+      0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+      45: "Fog", 48: "Depositing rime fog",
+      51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+      61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+      71: "Slight snow", 73: "Moderate snow", 75: "Heavy snow",
+      80: "Slight rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
+      95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail"
+    };
+
+    const CITY_COORDINATES = {
+      "karachi": ["Karachi", 24.8607, 67.0011],
+      "lahore": ["Lahore", 31.5204, 74.3587],
+      "islamabad": ["Islamabad", 33.6844, 73.0479]
+    };
+
+    async function findLocation(city) {
+      city = city.trim();
+      if (!city) throw new Error("Please enter a city name.");
+      const known = CITY_COORDINATES[city.toLowerCase()];
+      if (known) return known;
+      const res = await fetch("https://geocoding-api.open-meteo.com/v1/search?name=" +
+        encodeURIComponent(city) + "&count=1&language=en&format=json");
+      if (!res.ok) throw new Error("Unable to connect to the weather service.");
+      const data = await res.json();
+      if (!data.results || !data.results.length) throw new Error("Location not found.");
+      const r = data.results[0];
+      return [r.name, r.latitude, r.longitude];
+    }
+
+    function getAlert(code, wind) {
+      if (code >= 95) return "Alert: Thunderstorm conditions are possible.";
+      if (code === 65 || code === 82) return "Alert: Heavy rain is possible.";
+      if (wind >= 40) return "Alert: Strong winds are possible.";
+      return "No severe weather alert for the current conditions.";
+    }
+
+    async function load(city) {
+      const box = document.getElementById("result");
+      box.innerHTML = '<div class="card">Loading...</div>';
+      try {
+        const [name, lat, lon] = await findLocation(city);
+        const url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
+          "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code" +
+          "&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max" +
+          "&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto&forecast_days=3";
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Unable to connect to the weather service.");
+        const data = await res.json();
+        const c = data.current, d = data.daily;
+
+        let html = '<div class="card"><h2>' + name + '</h2>' +
+          '<p>' + (WEATHER_CODES[c.weather_code] || "Unknown condition") + '</p>' +
+          '<p>Temperature: ' + c.temperature_2m + ' °C (min ' + d.temperature_2m_min[0] + ' °C)</p>' +
+          '<p>Humidity: ' + c.relative_humidity_2m + '%</p>' +
+          '<p>Wind: ' + c.wind_speed_10m + ' km/h</p>' +
+          '<p><b>' + getAlert(c.weather_code, c.wind_speed_10m) + '</b></p></div>';
+
+        html += '<div class="card"><h3>Forecast</h3>';
+        d.time.forEach(function (date, i) {
+          html += '<p>' + date + ': ' + d.temperature_2m_min[i] + '° - ' + d.temperature_2m_max[i] + '° °C, ' +
+            (WEATHER_CODES[d.weather_code[i]] || "Unknown condition") +
+            ', rain ' + d.precipitation_probability_max[i] + '%</p>';
+        });
+        html += '</div>';
+        box.innerHTML = html;
+      } catch (err) {
+        box.innerHTML = '<div class="card error">' + err.message + '</div>';
+      }
+    }
+
+    document.getElementById("form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      load(document.getElementById("city").value);
+    });
+    load("Karachi");
+  </script>
+</body>
+</html>
